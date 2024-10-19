@@ -1,7 +1,7 @@
 import tkinter as tk
-from tkinter import IntVar, LabelFrame, Radiobutton, messagebox
+from tkinter import IntVar, LabelFrame, Menu, Radiobutton, messagebox
 from tkinter import ttk, filedialog
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import firebase_admin
 from firebase_admin import credentials, db, auth
 from datetime import datetime
@@ -20,7 +20,7 @@ import re
 
 
 # Initialize Firebase
-cred = credentials.Certificate("bloodbank-d5818-firebase-adminsdk-xo681-56855b8026.json")
+cred = credentials.Certificate("bloodbank-d5818-firebase-adminsdk-xo681-90bd2e62f5.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://bloodbank-d5818-default-rtdb.firebaseio.com/'
 })
@@ -60,6 +60,11 @@ def create_db():
     if not existing_hospitals:
         ref.set(hospitals)
 
+    ref2= db.reference('mailbox')
+    mail_box = ref2.get() 
+    if not mail_box:
+        print("Mailbox is empty. Creating default mailbox.")
+    
 
 create_db()
 
@@ -108,12 +113,16 @@ def remove_old_donations():
 
 
 #---------------------------------------------------------------------------------------------------------------------------------
-# Alert when blood stock is low 
+# Alert when blood stock is low
+# low_stock_types.append((hospital_id, blood_type, quantity)) 
 
 def check_blood_stock():
     # Reference to the hospital stock data
     hospitals_ref = db.reference('hospital_stock')
+    mailbox_ref = db.reference(f'mailbox')
+
     low_stock_types = []
+    messages_to_remove = []
 
     # Fetching all hospitals
     hospitals_data = hospitals_ref.get() or {}
@@ -127,40 +136,68 @@ def check_blood_stock():
                 # Set the threshold for notifications
                 if quantity < 10:  
                     low_stock_types.append((hospital_id, blood_type, quantity))
+                else:
+                    # If the quantity is above the threshold, mark it for removal
+                    messages_to_remove.append((hospital_id, blood_type, quantity))
 
-    # If any low stock types were found, show an alert
+    # If any low stock types were found, add messages
     if low_stock_types:
-        show_alert(low_stock_types)
+        add_message_to_mailbox(user_id, 'Low Blood Stock', low_stock_types)
 
-# Function to show alert box
-def show_alert(low_stock_types):
-    alert_message = "Low Stock Alert:\n\n"
-    for hospital_id, blood_type, quantity in low_stock_types:
-        alert_message += f"Hospital ID: {hospital_id}, Blood Type: {blood_type}: {quantity}\n"
+    # If any messages should be removed, do so
+    if messages_to_remove:
+        remove_messages_from_mailbox(user_id, messages_to_remove)
 
-    messagebox.showwarning("Alert", alert_message)
 
+# Function to add messages to the mailbox
 def add_message_to_mailbox(user_id, subject, content):
+    check=0
     try:
-        # Reference the mailbox of the user
-        ref = db.reference(f'mailbox/{user_id}')
+        ref = db.reference(f'mailbox')
+        existing_messages = ref.get() or {}
+
+        # Check for existing messages
+        for message_id, message_data in existing_messages.items():
+            for hospital_id, blood_type, quantity in content:
+                message_content = f"Hospital ID: {hospital_id}, Blood Type: {blood_type}: {quantity}"
+                if message_data['subject'] == subject and message_content in message_data['content']:
+                    print("Message already exists in the mailbox.")
+                    check=1
+                    
+                    
+        if check==0:
+            for hospital_id, blood_type, quantity in content:
+                new_message_ref = ref.push()  # Generate a unique ID for the new message
+                new_message_ref.set({
+                    'subject': subject,
+                    'content': f"Hospital ID: {hospital_id}, Blood Type: {blood_type}: {quantity}",
+                    'read': False  # Message starts as "unread"
+                })
         
-        # Create the mailbox node if it doesn't exist
-        ref.set({})  # This initializes the mailbox structure if it does not exist
-        
-        # Create a new message reference
-        new_message_ref = ref.push()  # Create a unique ID for the new message
-        
-        # Set the message details
-        new_message_ref.set({
-            'subject': subject,
-            'content': content,
-            'read': False  # Message starts as "unread"
-        })
-        print("Message added successfully.")
+
     except Exception as e:
         print(f"Error adding message to mailbox: {e}")
 
+
+# Function to remove messages from the mailbox
+def remove_messages_from_mailbox(user_id, messages_to_remove):
+    try:
+        ref = db.reference(f'mailbox')
+        existing_messages = ref.get() or {}
+
+        # Iterate through the existing messages
+        for message_id, message_data in existing_messages.items():
+            for hospital_id, blood_type, quantity in messages_to_remove:
+                message_content = f"Hospital ID: {hospital_id}, Blood Type: {blood_type}:"
+                if message_data['subject'] == 'Low Blood Stock' and message_content in message_data['content'] :
+                    # Remove the message if it matches the content
+                    message_content = f"Hospital ID: {hospital_id}, Blood Type: {blood_type}: {quantity}"
+                    ref.child(message_id).delete()
+
+    except Exception as e:
+        print(f"Error removing message: {e}")
+
+        
 #---------------------------------------------------------------------------------------------------------------------------------
 # Blood donation interface
 def donate_blood():
@@ -338,8 +375,8 @@ def dispense_blood():
 
             tk.Button(alternative_window, text="Submit Alternatives", command=submit_alternatives, bg="#F49386", fg="#030100", font=('Helvetica', 12)).pack(pady=15)
             tk.Button(alternative_window, text="Cancel", command=alternative_window.destroy, bg="#8c8c8c", fg="black", font=('Helvetica', 12)).pack(pady=15)
-
         check_blood_stock()
+        
 
     def get_alternative_units_dict(blood_type,hospital):
         compatible_types = {
@@ -426,6 +463,7 @@ def emergency_dispense():
             emergency_window.destroy()
         else:
             messagebox.showerror("Error", f"No O- blood units available in {selected_hospital}.")
+        check_blood_stock()
 
     emergency_window = tk.Toplevel(bg="white")
     emergency_window.title("Blood for Emergencies")
@@ -676,7 +714,7 @@ def manage_user_window():
     user_combobox.grid(row=8, column=1, sticky='W', pady=20)
 
     # Delete Button
-    tk.Button(manage_window, text="Delete", command=lambda: delete_user(user_to_remove.get()), font=('Helvetica', 10)).grid(row=8, column=2, sticky='EW', pady=5)
+    tk.Button(manage_window, text="Delete", command=lambda: delete_user(user_to_remove), font=('Helvetica', 10)).grid(row=8, column=2, sticky='EW', pady=5)
 
     # Second Separator
     separator2 = ttk.Separator(manage_window, orient='horizontal')
@@ -801,7 +839,6 @@ def blood_transfer_window():
 
     # Function to update destination hospital list, excluding the selected "from" hospital
     def update_destination_hospitals(*args):
-        print("** ", from_hospital_var.get())
         selected_from_hospital = from_hospital_var.get()
         available_hospitals = [h for h in hospitals_list if h != selected_from_hospital]
         dest_hospital_menu['values'] = available_hospitals
@@ -844,6 +881,44 @@ def blood_transfer_window():
 
 #---------------------------------------------------------------------------------------------------------------------------------
 # Main window setup
+
+#low stock messages dropdown
+def open_dropdown(event):
+    # Create the dropdown menu
+    dropdown_menu = tk.Menu(root, tearoff=0)
+
+    # Fetch messages from the user's mailbox
+    ref = db.reference(f'mailbox')
+    messages = ref.get() or {}
+
+    if not messages:
+        dropdown_menu.add_command(label="No new messages")
+    else:
+        for message_id, message_data in messages.items():
+            subject = message_data['subject']
+            content = message_data['content']  
+            is_read = message_data['read']
+
+            # Format the message
+            label = f"🔴 {subject}" if not is_read else subject  # Red dot for unread messages
+
+            # Add each message to the dropdown
+            dropdown_menu.add_command(label=label, command=lambda mid=message_id, cont=content: open_message(mid, cont))
+
+    # Display the menu at the mouse cursor's position
+    dropdown_menu.tk_popup(event.x_root, event.y_root)
+
+def open_message(messageId, content):
+    # Show the message content in a popup window
+   messagebox.showinfo("Low Blood Stock", content)
+
+    # Update the 'read' status of the specific message in Firebase
+   ref = db.reference(f'mailbox/{messageId}')
+    
+    # Only update the 'read' field to True without affecting other data
+   ref.update({'read': True})
+            
+
 def clear_root_widgets():
     for widget in root.winfo_children():
         widget.destroy()
@@ -853,7 +928,19 @@ def clear_main_widgets():
         widget.destroy()
     on_create(root)
 
+def add_red_dot_to_icon(image):
+    # Add a red dot to the top-right corner of the icon (for unread messages)
+    draw = ImageDraw.Draw(image)
+    dot_size = 200 # Adjust the size of the red dot
 
+    width, height = image.size
+    # Position for top-right: (width - dot_size, 0) for top-right corner
+    red_dot_position = (width - dot_size, 0)
+
+    # Draw the red dot as an ellipse, starting at (width - dot_size, 0)
+    draw.ellipse([red_dot_position, (width, dot_size)], fill="red")
+
+    return image
 
 def show_main_window(user_name):
     # Create the main window
@@ -864,18 +951,38 @@ def show_main_window(user_name):
 
     header_frame = tk.Frame(main_frame, bg='white')
     header_frame.pack(side="top", fill='x')
-    if user_role == 'admin':
+    if user_role == 'admin' or user_role == 'User':
+        ref = db.reference(f'mailbox')
+        messages = ref.get() or {}
+        has_unread_messages = any(not msg['read'] for msg in messages.values())
+
+        # Load mail icon
         image = Image.open("mail-icon.png")
+
+        if has_unread_messages:
+            # Add red dot to the icon if there are unread messages
+            image = add_red_dot_to_icon(image)
+
+        # Resize the image after potentially adding the red dot
         image = image.resize((30, 30))
+
+        # Debugging: Save the modified image to verify the red dot is added or not
+        image.save("debug_mail_icon.png")
+
         photo = ImageTk.PhotoImage(image)
-        
+
         # Create a frame to align the icon to the right
         image_label = tk.Label(header_frame, image=photo, bg='white', bd=0)
         image_label.image = photo  # Keep a reference to avoid garbage collection
-        image_label.pack(side="right",  pady=10)  # Pack it to the right side of the header frame
+        image_label.pack(side="right", pady=20)  # Pack it to the right side of the header frame
+
+        # Bind the click event to open the dropdown
+        image_label.bind("<Button-1>", open_dropdown)
 
 
-    tk.Label(main_frame, text=f"Welcome {user_name}, What would you like to do?", font=('Helvetica', 14, 'bold'), fg='#6C0707',bg='white').pack( anchor='w', pady=20)
+
+
+    tk.Label(main_frame, text=f"Welcome {user_name}, What would you like to do?", font=('Helvetica', 14, 'bold'), fg='#6C0707',bg='white').pack( anchor='w')
 
     button_frame = tk.Frame(main_frame,bg='white')
     button_frame.pack(pady=0)
@@ -1118,7 +1225,6 @@ def view_donation_history():
             timestamp = don_data.get('timestamp', 'N/A')
             details = don_data.get('details', 'N/A')
             check_id = don_data.get('id', 'N/A')
-            print('*****', details)
             if type(details)==str: 
                 donor_id, amount, blood_type=extract_data_from_details(details)  
             if(action=='New Donation' and donor_id==user_id):
@@ -1254,6 +1360,8 @@ def on_create(root):
 
     # remove donations that are more than 30 days old
     remove_old_donations()
+    #check if blood stock is low(less than 10 units)
+    check_blood_stock()
 
     root.title("Blood Management System")
     root.geometry("500x500")
